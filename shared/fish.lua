@@ -131,7 +131,7 @@ for k, data in pairs(FishTypes) do
     ChanceSum = ChanceSum + data.catchChance
 end
 
-local basePrice = 420000
+local basePrice = 84000 -- volt 420000 → halárak az ötödére
 FishSellable = {}
 
 for k, data in pairs(FishTypes) do
@@ -144,15 +144,40 @@ for k, data in pairs(FishTypes) do
     end
 end
 
-function ChooseRandomFish()
+-- legendaryMult (default 1.0): scales the catch-chance weight of every 'Legendary'-class
+-- fish for this single roll — used to apply horgász-szint / hotspot / időjárás bónuszokat
+-- without touching the base Chances table (which stays the shared, un-boosted baseline).
+function ChooseRandomFish(legendaryMult)
     if ChanceSum <= 0 then return nil end
-    local selected = math.random() * ChanceSum
-    local iterated = 0
-    for k, v in pairs(Chances) do
-        iterated = iterated + v
-        if selected <= iterated then
-            return k
+    legendaryMult = tonumber(legendaryMult) or 1.0
+
+    if legendaryMult == 1.0 then
+        local selected = math.random() * ChanceSum
+        local iterated = 0
+        for k, v in pairs(Chances) do
+            iterated = iterated + v
+            if selected <= iterated then return k end
         end
+        return 'rise_fish_mackerel'
+    end
+
+    local sum = 0
+    local weights = {}
+    for k, v in pairs(Chances) do
+        local w = v
+        local ft = FishTypes[k]
+        if ft and ft.class == 'Legendary' then
+            w = w * legendaryMult
+        end
+        weights[k] = w
+        sum = sum + w
+    end
+
+    local selected = math.random() * sum
+    local iterated = 0
+    for k, w in pairs(weights) do
+        iterated = iterated + w
+        if selected <= iterated then return k end
     end
     return 'rise_fish_mackerel'
 end

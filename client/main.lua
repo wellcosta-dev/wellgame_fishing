@@ -195,3 +195,11 @@ RegisterCommand('fishinghelp', function()
     Wait(50)
     QBCore.Functions.Notify('3) Kapáskor görgő le = horog / behúzás · Shift/Ctrl fokozat', 'primary')
 end, false)
+
+-- Hide fishing NUI while dashboard (or other fullscreen hubs) is open
+AddEventHandler('wellgame_dashboard:setHudHidden', function(hidden)
+    if hidden then
+        SendNUIMessage({ action = 'hideHud' })
+        SendNUIMessage({ action = 'gotFish', state = false })
+    end
+end)

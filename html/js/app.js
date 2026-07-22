@@ -59,6 +59,17 @@ function formatMoney(n) {
 }
 
 const soundPool = {};
+const loopPool = {};
+let sharedAudioCtx = null;
+
+function getAudioCtx() {
+  if (!sharedAudioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    sharedAudioCtx = new AC();
+  }
+  return sharedAudioCtx;
+}
 
 function playSound(file, volume) {
   try {
@@ -72,8 +83,70 @@ function playSound(file, volume) {
     const a = soundPool[key];
     a.pause();
     a.currentTime = 0;
+    a.playbackRate = 1;
     a.volume = Math.max(0, Math.min(1, Number(volume) || 0.5));
     a.play().catch(() => {});
+  } catch (_) {}
+}
+
+/**
+ * Continuous reel/spindle loop.
+ * Web Audio GainNode (smooth volume) — never playbackRate (CEF warbles MP3).
+ * Pause when silent so loops don't keep decoding under mute spam.
+ */
+function setLoopSound(id, file, volume) {
+  try {
+    const key = String(id || '');
+    if (!key) return;
+    const vol = Math.max(0, Math.min(1, Number(volume) || 0));
+    const ctx = getAudioCtx();
+
+    if (!loopPool[key]) {
+      const a = new Audio('nui://' + resName() + '/sounds/' + (file || 'reel.mp3'));
+      a.preload = 'auto';
+      a.loop = true;
+      a.volume = 1; // gain node owns loudness
+      a.playbackRate = 1;
+      const entry = { a, gain: null, lastVol: -1 };
+      if (ctx) {
+        try {
+          const src = ctx.createMediaElementSource(a);
+          const gain = ctx.createGain();
+          gain.gain.value = 0;
+          src.connect(gain);
+          gain.connect(ctx.destination);
+          entry.gain = gain;
+        } catch (_) {
+          a.volume = 0;
+        }
+      } else {
+        a.volume = 0;
+      }
+      loopPool[key] = entry;
+    }
+
+    const L = loopPool[key];
+    L.a.playbackRate = 1;
+
+    if (L.gain && ctx) {
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      const g = L.gain.gain;
+      try {
+        g.cancelScheduledValues(ctx.currentTime);
+        g.setTargetAtTime(vol, ctx.currentTime, 0.04);
+      } catch (_) {
+        g.value = vol;
+      }
+    } else {
+      L.a.volume = vol;
+    }
+
+    if (vol > 0.001) {
+      if (L.a.paused) L.a.play().catch(() => {});
+    } else if (!L.a.paused) {
+      L.a.pause();
+    }
+    L.lastVol = vol;
   } catch (_) {}
 }
 
@@ -408,6 +481,25 @@ window.addEventListener('message', (e) => {
     sellGame.style.opacity = '0';
   } else if (msg.action === 'playSound') {
     playSound(msg.file, msg.volume);
+  } else if (msg.action === 'loopSound') {
+    setLoopSound(msg.id, msg.file, msg.volume);
+  } else if (msg.action === 'openShop') {
+    openShopUi(msg.data || {});
+  } else if (msg.action === 'closeShop') {
+    if (fishShop) {
+      fishShop.classList.add('hidden');
+      fishShop.setAttribute('aria-hidden', 'true');
+    }
+  } else if (msg.action === 'shopCash') {
+    setShopCash(msg.cash);
+    if (typeof renderShopDetail === 'function') renderShopDetail();
+  } else if (msg.action === 'openFishLog') {
+    openFishLogUi(msg);
+  } else if (msg.action === 'closeFishLog') {
+    if (fishLog) {
+      fishLog.classList.add('hidden');
+      fishLog.setAttribute('aria-hidden', 'true');
+    }
   } else if (msg.action === 'tournamentBoard') {
     updateTournamentBoardData(msg.data || []);
   } else if (msg.action === 'tournamentBoardShow') {
@@ -467,8 +559,275 @@ if (tournamentClose) {
     tournament.classList.add('hidden');
   });
 }
+
+/* ===== Horgászbolt ===== */
+const fishShop = document.getElementById('fish-shop');
+const fishShopGrid = document.getElementById('fish-shop-grid');
+const fishShopCats = document.getElementById('fish-shop-cats');
+const fishShopDetail = document.getElementById('fish-shop-detail');
+const fishShopCash = document.getElementById('fish-shop-cash');
+let shopItems = [];
+let shopCategories = [];
+let shopCategory = 'all';
+let shopSelected = null;
+let shopCash = 0;
+
+function invImage(file) {
+  return 'nui://qb-inventory/html/images/' + (file || 'placeholder.png');
+}
+
+function formatShopMoney(n) {
+  return formatMoney(n) + ' $';
+}
+
+function setShopCash(n) {
+  shopCash = Math.max(0, Math.floor(Number(n) || 0));
+  if (fishShopCash) fishShopCash.textContent = formatShopMoney(shopCash);
+}
+
+function closeShopUi() {
+  if (!fishShop) return;
+  fishShop.classList.add('hidden');
+  fishShop.setAttribute('aria-hidden', 'true');
+  shopSelected = null;
+  post('shopClose', {});
+}
+
+function renderShopCats() {
+  if (!fishShopCats) return;
+  fishShopCats.innerHTML = '';
+  shopCategories.forEach((c) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'fish-shop-cat' + (c.id === shopCategory ? ' is-active' : '');
+    btn.textContent = c.label || c.id;
+    btn.addEventListener('click', () => {
+      shopCategory = c.id;
+      renderShopCats();
+      renderShopGrid();
+    });
+    fishShopCats.appendChild(btn);
+  });
+}
+
+function filteredShopItems() {
+  if (shopCategory === 'all') return shopItems;
+  return shopItems.filter((it) => it.category === shopCategory);
+}
+
+function renderShopGrid() {
+  if (!fishShopGrid) return;
+  fishShopGrid.innerHTML = '';
+  const list = filteredShopItems();
+  list.forEach((it) => {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'fish-shop-card' + (shopSelected && shopSelected.item === it.item ? ' is-selected' : '');
+    const imgWrap = document.createElement('div');
+    imgWrap.className = 'fish-shop-card-img';
+    const img = document.createElement('img');
+    img.alt = it.label || '';
+    img.src = invImage(it.image);
+    img.onerror = () => {
+      img.onerror = null;
+      img.src = invImage('placeholder.png');
+    };
+    imgWrap.appendChild(img);
+    const meta = document.createElement('div');
+    meta.className = 'fish-shop-card-meta';
+    meta.innerHTML =
+      '<div class="fish-shop-card-name"></div><div class="fish-shop-card-price"></div>';
+    meta.querySelector('.fish-shop-card-name').textContent = it.label || it.item;
+    meta.querySelector('.fish-shop-card-price').textContent = formatShopMoney(it.price);
+    card.appendChild(imgWrap);
+    card.appendChild(meta);
+    card.addEventListener('click', () => {
+      shopSelected = it;
+      renderShopGrid();
+      renderShopDetail();
+    });
+    fishShopGrid.appendChild(card);
+  });
+}
+
+function renderShopDetail() {
+  if (!fishShopDetail) return;
+  if (!shopSelected) {
+    fishShopDetail.innerHTML = '<div class="fish-shop-detail-empty">Válassz egy terméket</div>';
+    return;
+  }
+  const it = shopSelected;
+  const catLabel = (shopCategories.find((c) => c.id === it.category) || {}).label || it.category || '';
+  const canBuy = shopCash >= (it.price || 0);
+  fishShopDetail.innerHTML = '';
+  const imgBox = document.createElement('div');
+  imgBox.className = 'fish-shop-detail-img';
+  const img = document.createElement('img');
+  img.alt = it.label || '';
+  img.src = invImage(it.image);
+  img.onerror = () => {
+    img.onerror = null;
+    img.src = invImage('placeholder.png');
+  };
+  imgBox.appendChild(img);
+  const cat = document.createElement('div');
+  cat.className = 'fish-shop-detail-cat';
+  cat.textContent = catLabel;
+  const name = document.createElement('div');
+  name.className = 'fish-shop-detail-name';
+  name.textContent = it.label || it.item;
+  const desc = document.createElement('p');
+  desc.className = 'fish-shop-detail-desc';
+  desc.textContent = it.desc || '';
+  const price = document.createElement('div');
+  price.className = 'fish-shop-detail-price';
+  price.textContent = formatShopMoney(it.price);
+  const buy = document.createElement('button');
+  buy.type = 'button';
+  buy.className = 'fish-shop-buy';
+  buy.textContent = canBuy ? 'Megvásárlás' : 'Nincs elég készpénz';
+  buy.disabled = !canBuy;
+  buy.addEventListener('click', () => {
+    if (!shopSelected) return;
+    post('shopBuy', { item: shopSelected.item });
+  });
+  fishShopDetail.appendChild(imgBox);
+  fishShopDetail.appendChild(cat);
+  fishShopDetail.appendChild(name);
+  fishShopDetail.appendChild(desc);
+  fishShopDetail.appendChild(price);
+  fishShopDetail.appendChild(buy);
+}
+
+function openShopUi(data) {
+  if (!fishShop) return;
+  const d = data || {};
+  shopItems = Array.isArray(d.items) ? d.items : [];
+  shopCategories = Array.isArray(d.categories) && d.categories.length
+    ? d.categories
+    : [{ id: 'all', label: 'Összes' }];
+  shopCategory = 'all';
+  shopSelected = shopItems[0] || null;
+  setShopCash(d.cash);
+  const title = document.getElementById('fish-shop-title');
+  if (title && d.title) title.textContent = d.title;
+  renderShopCats();
+  renderShopGrid();
+  renderShopDetail();
+  fishShop.classList.remove('hidden');
+  fishShop.setAttribute('aria-hidden', 'false');
+}
+
+document.querySelectorAll('[data-shop-close]').forEach((el) => {
+  el.addEventListener('click', () => closeShopUi());
+});
+
+/* ===== Horgásznapló ===== */
+const fishLog = document.getElementById('fishlog');
+const fishLogGrid = document.getElementById('fishlog-grid');
+const fishLogTagline = document.getElementById('fishlog-tagline');
+const fishLogLevel = document.getElementById('fishlog-level');
+const fishLogProgressFill = document.getElementById('fishlog-progress-fill');
+const fishLogProgressText = document.getElementById('fishlog-progress-text');
+
+const CLASS_RANK = { Legendary: 0, Epic: 1, Rare: 2, Common: 3 };
+
+function closeFishLogUi() {
+  if (!fishLog) return;
+  fishLog.classList.add('hidden');
+  fishLog.setAttribute('aria-hidden', 'true');
+  post('closeFishLog', {});
+}
+
+function openFishLogUi(msg) {
+  if (!fishLog || !fishLogGrid) return;
+  const species = Array.isArray(msg.species) ? msg.species : [];
+  const caught = Array.isArray(msg.caught) ? msg.caught : [];
+  const level = Number(msg.level) || 1;
+  const maxLevel = Number(msg.maxLevel) || 30;
+  const perLevel = Number(msg.catchesPerLevel) || 15;
+
+  const caughtByKey = {};
+  let totalCatches = 0;
+  caught.forEach((row) => {
+    caughtByKey[row.fish_key] = row;
+    totalCatches += Number(row.count) || 0;
+  });
+
+  fishLogLevel.textContent = String(level);
+  const discoveredCount = Object.keys(caughtByKey).length;
+  fishLogTagline.textContent = `${discoveredCount} / ${species.length} faj felfedezve`;
+
+  if (level >= maxLevel) {
+    fishLogProgressFill.style.width = '100%';
+    fishLogProgressText.textContent = 'Elérted a max szintet';
+  } else {
+    const into = totalCatches % perLevel;
+    fishLogProgressFill.style.width = `${Math.round((into / perLevel) * 100)}%`;
+    fishLogProgressText.textContent = `${into} / ${perLevel} a következő szintig`;
+  }
+
+  const sorted = species.slice().sort((a, b) => {
+    const aCaught = !!caughtByKey[a.key];
+    const bCaught = !!caughtByKey[b.key];
+    if (aCaught !== bCaught) return aCaught ? -1 : 1;
+    const rankDiff = (CLASS_RANK[a.class] ?? 9) - (CLASS_RANK[b.class] ?? 9);
+    if (rankDiff !== 0) return rankDiff;
+    return String(a.name).localeCompare(String(b.name));
+  });
+
+  fishLogGrid.innerHTML = '';
+  sorted.forEach((sp) => {
+    const row = caughtByKey[sp.key];
+    const card = document.createElement('div');
+    card.className = 'fishlog-card' + (row ? ' is-caught' : ' is-undiscovered');
+
+    const top = document.createElement('div');
+    top.className = 'fishlog-card-top';
+    const name = document.createElement('span');
+    name.className = 'fishlog-card-name';
+    name.textContent = row ? sp.name : '???';
+    const cls = document.createElement('span');
+    cls.className = 'fishlog-card-class class-' + String(sp.class || 'common').toLowerCase();
+    cls.textContent = sp.class || 'Common';
+    top.appendChild(name);
+    top.appendChild(cls);
+    card.appendChild(top);
+
+    const stats = document.createElement('div');
+    stats.className = 'fishlog-card-stats';
+    if (row) {
+      const parts = [`Fogások: <b>${row.count}</b>`];
+      if (!sp.nonAlive) {
+        parts.push(`Legjobb: <b>${Number(row.best_weight).toFixed(1)} kg</b> / <b>${row.best_length} cm</b>`);
+      }
+      stats.innerHTML = parts.join('<br>');
+    } else {
+      stats.textContent = 'Még nem fogtad ki';
+    }
+    card.appendChild(stats);
+
+    fishLogGrid.appendChild(card);
+  });
+
+  fishLog.classList.remove('hidden');
+  fishLog.setAttribute('aria-hidden', 'false');
+}
+
+document.querySelectorAll('[data-fishlog-close]').forEach((el) => {
+  el.addEventListener('click', () => closeFishLogUi());
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (fishShop && !fishShop.classList.contains('hidden')) {
+      closeShopUi();
+      return;
+    }
+    if (fishLog && !fishLog.classList.contains('hidden')) {
+      closeFishLogUi();
+      return;
+    }
     if (tournament && !tournament.classList.contains('hidden')) {
       if (tournamentTimer) clearTimeout(tournamentTimer);
       tournament.classList.add('hidden');

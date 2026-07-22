@@ -2,6 +2,7 @@
 <html lang="hu">
 <head>
   <meta charset="UTF-8" />
+  <link rel="stylesheet" href="nui://wellgames-gui/html/wellcosta.css" />
   <link rel="stylesheet" href="css/style.css" />
   <title>wellgame_fishing</title>
 </head>
@@ -11,6 +12,60 @@
     <div id="gotfish-bg" class="gotfish-layer gotfish-bg" aria-hidden="true"></div>
     <div id="gotfish-fg" class="gotfish-layer gotfish-fg">
       <div class="gotfish-text-img" role="img" aria-label="Kapásod van!"></div>
+    </div>
+  </div>
+
+  <!-- Horgászbolt — modern Wellcosta shop -->
+  <div id="fish-shop" class="fish-shop hidden" aria-hidden="true">
+    <div class="fish-shop-backdrop" data-shop-close></div>
+    <div class="fish-shop-panel" role="dialog" aria-labelledby="fish-shop-title">
+      <header class="fish-shop-header">
+        <div class="fish-shop-brand">
+          <span class="fish-shop-brand-mark">WELLCOSTA</span>
+          <h1 id="fish-shop-title" class="fish-shop-title">Horgászbolt</h1>
+          <p class="fish-shop-tagline">Felszerelés a parttól a mélyvízig</p>
+        </div>
+        <div class="fish-shop-cash">
+          <span class="fish-shop-cash-label">Készpénz</span>
+          <span id="fish-shop-cash" class="fish-shop-cash-value">0 $</span>
+        </div>
+        <button type="button" class="fish-shop-close" id="fish-shop-close" title="Bezárás" data-shop-close>
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+        </button>
+      </header>
+      <nav class="fish-shop-cats" id="fish-shop-cats" aria-label="Kategóriák"></nav>
+      <div class="fish-shop-body">
+        <div class="fish-shop-grid" id="fish-shop-grid"></div>
+        <aside class="fish-shop-detail" id="fish-shop-detail">
+          <div class="fish-shop-detail-empty">Válassz egy terméket</div>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <!-- Horgásznapló — gyűjtemény + szint (/fishlog, F7) -->
+  <div id="fishlog" class="fish-shop hidden" aria-hidden="true">
+    <div class="fish-shop-backdrop" data-fishlog-close></div>
+    <div class="fish-shop-panel fishlog-panel" role="dialog" aria-labelledby="fishlog-title">
+      <header class="fish-shop-header">
+        <div class="fish-shop-brand">
+          <span class="fish-shop-brand-mark">WELLCOSTA</span>
+          <h1 id="fishlog-title" class="fish-shop-title">Horgásznapló</h1>
+          <p class="fish-shop-tagline" id="fishlog-tagline">0 / 0 faj felfedezve</p>
+        </div>
+        <div class="fishlog-level-badge">
+          <span class="fishlog-level-label">Szint</span>
+          <span class="fishlog-level-value" id="fishlog-level">1</span>
+        </div>
+        <button type="button" class="fish-shop-close" id="fishlog-close" title="Bezárás" data-fishlog-close>
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+        </button>
+      </header>
+      <div class="fishlog-progress">
+        <div class="fishlog-progress-track"><div class="fishlog-progress-fill" id="fishlog-progress-fill"></div></div>
+        <span class="fishlog-progress-text" id="fishlog-progress-text">0 / 15 a következő szintig</span>
+      </div>
+      <div class="fishlog-grid" id="fishlog-grid"></div>
     </div>
   </div>
 

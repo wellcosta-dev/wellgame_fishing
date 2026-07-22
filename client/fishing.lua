@@ -51,19 +51,36 @@ function WGAnim.Play(dict, clip, progress)
     return restarted
 end
 
---- Frozen pose (no arm wobble → no tip/tension jitter). Used after cast / in water.
-function WGAnim.PlayFrozen(dict, clip, progress)
+--- Frozen pose. upperBody=true → csak törzs/kar (flag 17), lábak nem dőlnek.
+function WGAnim.PlayFrozen(dict, clip, progress, upperBody)
     dict = dict or (Config.FishAnims and Config.FishAnims.dict)
     clip = clip or (Config.FishAnims and Config.FishAnims.idle)
     if not dict or not clip then return false end
     if not loadAnimDict(dict) then return false end
     local ped = PlayerPedId()
+    local a = Config.FishAnims or {}
+    if a.cast and a.cast ~= clip and IsEntityPlayingAnim(ped, dict, a.cast, 3) then
+        StopAnimTask(ped, dict, a.cast, 0.0)
+    end
+
+    local wantUpper = upperBody == true
+    local flag = wantUpper and 17 or 1 -- 17 = loop + upper body only
+    local playing = IsEntityPlayingAnim(ped, dict, clip, 3)
     local restarted = false
-    if not IsEntityPlayingAnim(ped, dict, clip, 3) then
-        TaskPlayAnim(ped, dict, clip, 2.0, 2.0, -1, 1, 0.0, false, false, false)
+
+    -- flag váltáskor újraindítás kell (full body ↔ upper body)
+    if playing and WGAnim._frozenUpper ~= wantUpper then
+        StopAnimTask(ped, dict, clip, 0.0)
+        playing = false
+    end
+
+    if not playing then
+        TaskPlayAnim(ped, dict, clip, 8.0, -8.0, -1, flag, 0.0, false, false, false)
         restarted = true
     end
-    local fallback = (Config.FishAnims and Config.FishAnims.waterPoseProgress) or 1.0
+    WGAnim._frozenUpper = wantUpper
+
+    local fallback = a.waterPoseProgress or 0.99
     local p = math.max(0.0, math.min(0.99, progress or fallback))
     SetEntityAnimCurrentTime(ped, dict, clip, p)
     SetEntityAnimSpeed(ped, dict, clip, 0.0)
@@ -77,10 +94,21 @@ function WGAnim.ProgressFromTension(throwingTension)
     return (tonumber(throwingTension) or 0.0) * mul + base
 end
 
+--- Cast lean: tension 0 → waterPose, tension 1 → castLeanBackProgress (szűk sáv = törzs, nem orsó).
+function WGAnim.ProgressFromCastLean(throwingTension)
+    local a = Config.FishAnims or {}
+    local forward = a.waterPoseProgress or 0.99
+    local back = a.castLeanBackProgress or 0.86
+    local t = math.max(0.0, math.min(1.0, tonumber(throwingTension) or 0.0))
+    local p = forward + (back - forward) * t
+    return math.max(0.0, math.min(0.99, p))
+end
+
 function WGAnim.Clear()
     local ped = PlayerPedId()
     local dict = Config.FishAnims and Config.FishAnims.dict
     ClearPedTasks(ped)
+    WGAnim._frozenUpper = nil
     if dict and HasAnimDictLoaded(dict) then
         local a = Config.FishAnims
         if a.idle then StopAnimTask(ped, dict, a.idle, 1.0) end
@@ -450,18 +478,22 @@ local function deleteFishPreview()
     fishPreview = nil
 end
 
-local function bindRodToHand()
+local function bindRodToHand(lean01)
     if not rodObj or not DoesEntityExist(rodObj) then return end
     local ped = PlayerPedId()
     local a = Config.RodAttach or {}
     local bone = GetPedBoneIndex(ped, a.bone or 18905)
     local p = a.pos or vector3(0.1, 0.05, 0.0)
     local r = a.rot or vector3(80.0, 120.0, 160.0)
-    -- NO per-frame tension bend — az elmozdítaná a tipet / damilt
+    local lean = math.max(0.0, math.min(1.0, tonumber(lean01) or 0.0))
+    local lr = a.castLeanRot or vector3(0.0, 0.0, 0.0)
+    local rx = r.x + lr.x * lean
+    local ry = r.y + lr.y * lean
+    local rz = r.z + lr.z * lean
     AttachEntityToEntity(
         rodObj, ped, bone,
         p.x, p.y, p.z,
-        r.x, r.y, r.z,
+        rx, ry, rz,
         true, true, false, true, 1, true
     )
     SetEntityCollision(rodObj, false, false)
@@ -470,14 +502,16 @@ end
 
 local function playFishAnim(clip, progress)
     local dict = Config.FishAnims.dict
+    WGAnim._frozenUpper = nil
     local restarted = WGAnim.Play(dict, clip, progress)
-    if restarted then bindRodToHand() end
+    if restarted then bindRodToHand(0.0) end
 end
 
-local function playFishAnimFrozen(clip, progress)
+local function playFishAnimFrozen(clip, progress, upperBody)
     local dict = Config.FishAnims.dict
-    local restarted = WGAnim.PlayFrozen(dict, clip, progress)
-    if restarted then bindRodToHand() end
+    local restarted = WGAnim.PlayFrozen(dict, clip, progress, upperBody)
+    -- lean amount separately via bindRodToHand(lean) from holdCastLeanPose
+    if restarted then bindRodToHand(0.0) end
 end
 
 local function ensureIdleAnim()
@@ -489,34 +523,95 @@ local function ensureIdleAnim()
     end
 end
 
---- Water modes: hold a static pose so rod tip doesn't wander and spike tension
 local waterPoseOn = false
+local castLeanRecoverFrom = nil -- 0–1 lean amount at release
+local castLeanRecoverStart = 0
+local castAimYaw = nil
+local castLeanFrameAmount = 0.0
+
 local function waterPoseProgress()
-    local p = (Config.FishAnims and Config.FishAnims.waterPoseProgress) or 1.0
+    local p = (Config.FishAnims and Config.FishAnims.waterPoseProgress) or 0.99
     return math.max(0.0, math.min(0.99, p))
 end
 
+local function clearCastLeanRecover()
+    castLeanRecoverFrom = nil
+    castLeanRecoverStart = 0
+end
+
+local function clearWaterPoseFlag()
+    waterPoseOn = false
+end
+
+--- No-op leftover (never pitch the whole ped). Clears aim yaw lock.
+local function clearCastLeanPitch()
+    castAimYaw = nil
+end
+
+--- Derék/törzs hátradőlés: upper-body-only idle_c (flag 17) + bot tilt.
+--- SOHA SetEntityRotation a peden — az az egész testet dönti.
+local function holdCastLeanPose(lean01)
+    local ped = PlayerPedId()
+    local dict = Config.FishAnims.dict
+    local idle = Config.FishAnims.idle
+    local cast = Config.FishAnims.cast
+    if cast and IsEntityPlayingAnim(ped, dict, cast, 3) then
+        StopAnimTask(ped, dict, cast, 0.0)
+    end
+    if castAimYaw == nil then
+        castAimYaw = GetEntityHeading(ped)
+    end
+    castLeanFrameAmount = math.max(0.0, math.min(1.0, tonumber(lean01) or 0.0))
+    local progress = WGAnim.ProgressFromCastLean(castLeanFrameAmount)
+    -- flag 17: csak felsőtest/derék; lábak állva maradnak
+    playFishAnimFrozen(idle, progress, true)
+    bindRodToHand(castLeanFrameAmount)
+end
+
 local function ensureWaterPose()
+    if castLeanRecoverFrom ~= nil then return end
+    castLeanFrameAmount = 0.0
     local ped = PlayerPedId()
     local dict = Config.FishAnims.dict
     local idle = Config.FishAnims.idle
     local cast = Config.FishAnims.cast
     local poseP = waterPoseProgress()
     if cast and IsEntityPlayingAnim(ped, dict, cast, 3) then
-        StopAnimTask(ped, dict, cast, 0.15)
+        StopAnimTask(ped, dict, cast, 0.0)
         waterPoseOn = false
     end
-    if waterPoseOn and IsEntityPlayingAnim(ped, dict, idle, 3) then
+    if waterPoseOn and IsEntityPlayingAnim(ped, dict, idle, 3) and WGAnim._frozenUpper == false then
         SetEntityAnimCurrentTime(ped, dict, idle, poseP)
         SetEntityAnimSpeed(ped, dict, idle, 0.0)
+        bindRodToHand(0.0)
         return
     end
-    playFishAnimFrozen(idle, poseP)
+    playFishAnimFrozen(idle, poseP, false)
+    bindRodToHand(0.0)
     waterPoseOn = true
 end
 
-local function clearWaterPoseFlag()
+local function startCastLeanRecover(lean01)
+    castLeanRecoverFrom = math.max(0.0, math.min(1.0, tonumber(lean01) or 0.0))
+    castLeanRecoverStart = GetGameTimer()
     waterPoseOn = false
+end
+
+local function updateCastLeanRecover(now)
+    if castLeanRecoverFrom == nil then return false end
+    local recoverMs = (Config.FishAnims and Config.FishAnims.castLeanRecoverMs) or 750
+    local elapsed = now - castLeanRecoverStart
+    local t = recoverMs > 0 and math.min(1.0, elapsed / recoverMs) or 1.0
+    local eased = 1.0 - (1.0 - t) * (1.0 - t)
+    local lean = castLeanRecoverFrom * (1.0 - eased)
+    holdCastLeanPose(lean)
+    if t >= 1.0 then
+        clearCastLeanRecover()
+        castLeanFrameAmount = 0.0
+        bindRodToHand(0.0)
+        ensureWaterPose()
+    end
+    return true
 end
 
 local function clearFishAnim()
@@ -583,6 +678,9 @@ local function stopFishing()
     hudTension = 0.0
     lineVelocity = 0.0
     lineLength = 0.0
+    clearCastLeanRecover()
+    clearCastLeanPitch()
+    clearWaterPoseFlag()
     clearFloat()
     deleteFishPreview()
     resetFightState()
@@ -591,6 +689,8 @@ local function stopFishing()
     setHud(false)
     setGotFishState(false)
     endWinShowcase()
+    local a = Audio()
+    if a and a.Reset then a.Reset() end
     LocalPlayer.state:set('wgFishing', false, false)
     TriggerEvent('wellgame_fishing:client:localSyncClear')
     if GetResourceState('wellgame_controls') == 'started' then
@@ -642,6 +742,8 @@ local function beginThrow()
         mode = 'idle'
         casting = false
         throwingTension = 0.0
+        clearCastLeanRecover()
+        clearCastLeanPitch()
         clearWaterPoseFlag()
         playFishAnim(Config.FishAnims.idle, nil)
         updateHud()
@@ -652,6 +754,8 @@ local function beginThrow()
         mode = 'idle'
         casting = false
         throwingTension = 0.0
+        clearCastLeanRecover()
+        clearCastLeanPitch()
         clearWaterPoseFlag()
         playFishAnim(Config.FishAnims.idle, nil)
         updateHud()
@@ -668,11 +772,17 @@ local function beginThrow()
         return
     end
 
-    local cam = GetGameplayCamCoord()
+    local force = throwingTension
+    local leanAtRelease = math.max(0.0, math.min(1.0, force))
+    -- Dobás irány: aim yaw (bot-lean nem mozgatja a pedet)
+    local aimYaw = castAimYaw or GetEntityHeading(ped)
+    castAimYaw = nil
+    SetEntityHeading(ped, aimYaw)
+
     local camRot = GetGameplayCamRot(2)
     local heading = math.rad(camRot.z)
-    local pedH = math.rad(GetEntityHeading(ped))
-    -- clamp camera yaw relative to ped ±45°
+    local pedH = math.rad(aimYaw)
+    -- clamp camera yaw relative to aim yaw ±45°
     local cr = heading - pedH
     while cr > math.pi do cr = cr - math.pi * 2 end
     while cr < -math.pi do cr = cr + math.pi * 2 end
@@ -680,8 +790,9 @@ local function beginThrow()
     local dx = -math.sin(cr)
     local dy = math.cos(cr)
 
-    local force = throwingTension
     local phys = Config.Physics or {}
+    -- Tip egyenes botállással (lean 0), hogy ne balra induljon a dobás
+    bindRodToHand(0.0)
     local tipX, tipY, tipZ = WGLine.GetRodTip(rodObj, ped)
     spawnBobberAt(tipX, tipY, tipZ + 0.15)
     throwForce = {
@@ -694,13 +805,12 @@ local function beginThrow()
     floatingValue = 0.0
     mode = 'throw'
     casting = false
-    throwingTension = 0.0 -- ne scruboljon cast animot dobás közben
+    throwingTension = 0.0
     playSound('woosh.mp3', 0.55)
     local a = Audio()
     if a then a.Cast() end
-    -- bedobás után azonnal fagyasztott stand — nincs scrub / tip cibálás
-    ensureWaterPose()
-    bindRodToHand()
+    holdCastLeanPose(leanAtRelease)
+    startCastLeanRecover(leanAtRelease)
     TriggerServerEvent('wellgame_fishing:server:throwStart')
     updateHud()
 end
@@ -739,6 +849,8 @@ local function doSnap(tear, reason)
     local a = Audio()
     if a then a.Snap() else playSound('snap.mp3', 0.55) end
     if a and a.Reset then a.Reset() end
+    clearCastLeanRecover()
+    clearCastLeanPitch()
     clearWaterPoseFlag()
     playFishAnim(Config.FishAnims.idle, nil)
     TriggerEvent('wellgame_fishing:client:localSyncClear')
@@ -824,9 +936,11 @@ end
 
 local function decayLineVel(dt)
     if lineVelocity == 0.0 then return end
+    local phys = Config.Physics or {}
     local abs = math.abs(lineVelocity)
     local sign = lineVelocity / abs
-    local slow = math.max(2.0, abs * 2.0)
+    local decay = phys.lineVelDecay or 1.15
+    local slow = math.max(decay, abs * decay)
     lineVelocity = lineVelocity - sign * slow * dt
     if (sign < 0 and lineVelocity > 0) or (sign > 0 and lineVelocity < 0) then
         lineVelocity = 0.0
@@ -834,23 +948,25 @@ local function decayLineVel(dt)
 end
 
 local function applyScrollImpulse()
+    local phys = Config.Physics or {}
     local g = gearMul()
-    local impulse = ((Config.Physics and Config.Physics.scrollImpulse) or 0.25) * g
+    local impulse = (phys.scrollImpulse or 0.25) * g
+    local direct = math.max(0.0, math.min(1.0, phys.scrollDirect or 0.72))
+    local velMul = phys.scrollVelMul or 1.55
     local changed = false
     if wheelReelIn() then
-        lineVelocity = lineVelocity - impulse
+        -- Azonnali damilhúzás + rövid velocity follow-through (kevesebb "késleltetett" érzet)
+        lineLength = math.max(0.5, lineLength - impulse * direct)
+        lineVelocity = lineVelocity - impulse * (1.0 - direct) * velMul
         changed = true
     end
     if wheelLetOut() then
-        lineVelocity = lineVelocity + impulse
+        lineLength = math.min(100.0, lineLength + impulse * direct)
+        lineVelocity = lineVelocity + impulse * (1.0 - direct) * velMul
         changed = true
     end
     if changed then
-        local t = GetGameTimer()
-        if t - lastReelSound > 90 then
-            lastReelSound = t
-            playSound('reel.mp3', 0.22)
-        end
+        -- hangot a v4-szerű looping ProcessReel/ProcessSpindle kezeli (nincs one-shot spam)
     end
 end
 
@@ -1178,7 +1294,9 @@ local function updateCatchedFishAI(dt, rodEndX, rodEndY, waterZ)
     local tipLen = math.sqrt(tipVx * tipVx + tipVy * tipVy)
     if tipLen > 0.001 then tipVx, tipVy = tipVx / tipLen, tipVy / tipLen end
 
-    local force = (phys.fishResist or 0.45) * (0.2 + 0.8 * wf) * e
+    -- Súlyfaktor: kis hal is érezhetően húzzon (padló 0.45), nagy még erősebben
+    local weightPull = 0.45 + 0.55 * wf
+    local force = (phys.fishResist or 0.45) * weightPull * e
     local spd = ((60.0 - (fishWeight or 1.0)) / (phys.fishSwimWeightDiv or 10.0)) + (phys.fishSwimBase or 3.0)
     fvx = fvx * spd * e
     fvy = fvy * spd * e
@@ -1213,9 +1331,10 @@ CreateThread(function()
 
             pollGearKeys()
 
-            -- Aim / charge — cast scrub CSAK aim+LMB közben
+            -- Aim / charge — upper-body derékdőlés + bot tilt (nincs whole-body pitch)
             if IsDisabledControlPressed(0, Config.Controls.aim) and (mode == 'idle' or mode == 'aim') then
                 clearWaterPoseFlag()
+                clearCastLeanRecover()
                 mode = 'aim'
                 if IsDisabledControlJustPressed(0, Config.Controls.cast) then
                     casting = true
@@ -1224,7 +1343,7 @@ CreateThread(function()
                 end
                 if casting and IsDisabledControlPressed(0, Config.Controls.cast) then
                     throwingTension = math.min(1.0, throwingTension + dt / 2.0)
-                    playFishAnim(Config.FishAnims.cast, WGAnim.ProgressFromTension(throwingTension))
+                    holdCastLeanPose(throwingTension)
                 elseif casting and IsDisabledControlJustReleased(0, Config.Controls.cast) then
                     casting = false
                     beginThrow()
@@ -1232,22 +1351,25 @@ CreateThread(function()
                     if not casting then
                         throwingTension = math.max(0.0, throwingTension - dt / 2.0)
                     end
-                    if casting or throwingTension > 0.01 then
-                        playFishAnim(Config.FishAnims.cast, WGAnim.ProgressFromTension(math.max(throwingTension, 0.0)))
-                    else
-                        playFishAnim(Config.FishAnims.cast, 0.15)
-                    end
+                    holdCastLeanPose(math.max(throwingTension, 0.0))
                 end
             elseif mode == 'aim' and not IsDisabledControlPressed(0, Config.Controls.aim) then
                 mode = 'idle'
                 casting = false
                 throwingTension = 0.0
+                castLeanFrameAmount = 0.0
+                clearCastLeanRecover()
+                clearCastLeanPitch()
                 clearWaterPoseFlag()
                 playFishAnim(Config.FishAnims.idle, nil)
             elseif mode == 'throw' or mode == 'waiting' or mode == 'catching' or mode == 'catched' then
-                -- bedobás után: fagyasztott pose — ne cibálja a tipet / feszültséget
-                ensureWaterPose()
+                if not updateCastLeanRecover(now) then
+                    ensureWaterPose()
+                end
             elseif mode == 'getout' then
+                clearCastLeanRecover()
+                clearCastLeanPitch()
+                castLeanFrameAmount = 0.0
                 local p = math.min(1.0, (now - getOutStart) / (Config.GetOutMs or 4000))
                 local need = fishKey and 1.0 or 0.5
                 if p >= need then
@@ -1255,7 +1377,20 @@ CreateThread(function()
                 end
             elseif mode == 'idle' then
                 clearWaterPoseFlag()
+                clearCastLeanRecover()
+                clearCastLeanPitch()
+                castLeanFrameAmount = 0.0
                 ensureIdleAnim()
+            end
+
+            if mode ~= 'throw' and mode ~= 'waiting' and mode ~= 'catching' and mode ~= 'catched' then
+                -- Mute once (audio API throttles duplicates)
+                local au = Audio()
+                if au and au.Reset then
+                    -- only soft-mute loops, don't reset creak state every frame
+                    au.ProcessReel(0)
+                    au.ProcessSpindle(0)
+                end
             end
 
             local tipX, tipY, tipZ = WGLine.GetRodTip(rodObj, ped)
@@ -1448,11 +1583,9 @@ CreateThread(function()
                             spindleRoll = spindleRoll - lineVelocity * dt * 0.35
                             local au = Audio()
                             if au then
-                                local reelIn = math.max(0.0, -lineVelocity)
-                                if reelIn > 0.08 then
-                                    au.ProcessReel(reelIn)
-                                    au.ProcessSpindle(reelIn * 6.0)
-                                end
+                                -- v4: reel loop from total line vel (payout > 0); spindle from handle spin
+                                au.ProcessReel(vel)
+                                au.ProcessSpindle(math.abs(lineVelocity) * 5.0)
                                 au.ProcessCreak(tension, dt)
                             end
 

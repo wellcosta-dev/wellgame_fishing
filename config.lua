@@ -20,28 +20,31 @@ Config.Physics = {
     throwVertMul = 15.0,
     throwHorizAccel = -22.0,
     throwGravity = -9.8,
-    tensionDiv = 1.5,
-    tensionSmooth = 4.0,
+    tensionDiv = 1.35,         -- kisebb = ugyanarra a húzásra nagyobb feszültség
+    tensionSmooth = 7.0,       -- gyorsabb feszültség-válasz (érezhetőbb rántás)
     scrollImpulse = 0.38,
+    scrollDirect = 0.55,
+    scrollVelMul = 1.1,
+    lineVelDecay = 1.4,
     gearStep = 0.35,
-    autoPayout = 5.5,
+    autoPayout = 4.0,          -- kevesebb automatikus engedés → a hal jobban „fog”
     animProgressBase = 0.15,
     animProgressMul = 0.825,
-    -- Kapás / götgetés (catching mode float jerks)
-    biteForceMin = 2.8,
-    biteForceMax = 5.5,
-    biteForceDecay = 3.2,
-    biteDipDepth = 2.15,      -- Z merülés szorzó (volt 1.25)
-    biteFloatSink = 2.4,      -- úszó döntés merülési sebesség
-    biteFloatFloor = 0.05,    -- min floatingValue kapáskor
-    -- v4 fish AI (erősebb ellenállás + gyakoribb iránváltás + lassabb fáradás = nagyobb kihívás)
-    fishSwimBase = 4.0,
+    -- Kapás / götgetés
+    biteForceMin = 3.8,
+    biteForceMax = 7.2,
+    biteForceDecay = 2.5,
+    biteDipDepth = 2.15,
+    biteFloatSink = 2.4,
+    biteFloatFloor = 0.05,
+    -- Hal AI: erősebb úszás + ellenállás, lassabb fáradás, gyakoribb iránváltás
+    fishSwimBase = 5.5,
     fishSwimWeightDiv = 10.0,
-    fishResist = 0.85,
-    fishEnergyDrain = 0.008,
-    fishForceSwitchMin = 800,
-    fishForceSwitchMax = 8000,
-    snapHoldSec = 0.65,
+    fishResist = 1.35,
+    fishEnergyDrain = 0.0048,
+    fishForceSwitchMin = 500,
+    fishForceSwitchMax = 4200,
+    snapHoldSec = 0.75,
 }
 
 Config.SyncIntervalMs = 250
@@ -68,18 +71,60 @@ Config.NpcTagFadeStart = 0.6
 
 -- Baitshop props at dropoffs (GTA fallback until des_baitshop stream)
 Config.Baitshops = {
-    { coords = vector4(-1851.5, -1246.8, 8.6, 140.0), model = `prop_tool_bench02`, label = 'Horgász felszerelés' },
-    { coords = vector4(131.5, 3371.5, 31.0, 200.0), model = `prop_tool_bench02`, label = 'Horgász felszerelés' },
-    { coords = vector4(3809.5, 4479.5, 4.3, 200.0), model = `prop_tool_bench02`, label = 'Horgász felszerelés' },
+    { coords = vector4(-1851.5, -1246.8, 8.6, 140.0), model = `prop_tool_bench02`, label = 'Horgászbolt' },
+    { coords = vector4(131.5, 3371.5, 31.0, 200.0), model = `prop_tool_bench02`, label = 'Horgászbolt' },
+    { coords = vector4(3809.5, 4479.5, 4.3, 200.0), model = `prop_tool_bench02`, label = 'Horgászbolt' },
+    { coords = vector4(715.9, 4103.3, 35.7852, 93.0), model = `prop_tool_bench02`, label = 'Horgászbolt' },
 }
 
+-- Horgászengedély: kötelező item a horgászbot használatához, a bolt(ok)ban vásárolható.
+-- (A Config.BaitshopItems lentebb hivatkozik rá, ezért ennek előbb kell lefutnia.)
+Config.License = {
+    enabled = true,
+    item = 'fishing_license',
+    price = 1500,
+}
+
+-- Kezdőcsomag: egyben megvehető alapfelszerelés, a darabár-összegnél kicsit olcsóbban.
+-- (Ugyanígy a Config.BaitshopItems előtt kell lennie.)
+Config.StarterKit = {
+    enabled = true,
+    price = 3800, -- külön-külön: rod_1 3200 + line_1 550 + float_1 420 + bait 275 = 4445
+    items = { 'fishing_rod_1', 'fishing_line_1', 'fishing_float_1', 'fishing_bait' },
+}
+
+-- Boltárak: fix $-összeg (NEM EconomyScale). Emelt árak a régi qb-menu listához képest.
+Config.BaitshopCategories = {
+    { id = 'all', label = 'Összes' },
+    { id = 'starter', label = 'Kezdőcsomag' },
+    { id = 'license', label = 'Engedély' },
+    { id = 'bait', label = 'Csali' },
+    { id = 'line', label = 'Damil' },
+    { id = 'float', label = 'Úszó' },
+    { id = 'rod', label = 'Bot' },
+    { id = 'elite', label = 'Elite' },
+}
+
+-- `starterkit` egy virtuális katalógustétel — a szerver (server/shop.lua) külön kezeli, és a
+-- Config.StarterKit.items mindegyikéből egyet ad, nem egy valódi item.
 Config.BaitshopItems = {
-    { item = 'fishing_bait', price = 50, label = 'Csali (20 adag)' },
-    { item = 'fishing_line_1', price = 120, label = 'Damil (bézs)' },
-    { item = 'fishing_line_3', price = 180, label = 'Damil (fehér)' },
-    { item = 'fishing_float_1', price = 80, label = 'Úszó' },
-    { item = 'fishing_float_2', price = 120, label = 'Úszó Pro' },
-    { item = 'fishing_rod_1', price = 500, label = 'Horgászbot' },
+    { item = 'starterkit', price = Config.StarterKit.price, label = 'Kezdőcsomag', category = 'starter', image = 'fishing_rod_1.png', desc = 'Bot + damil + úszó + csali egyben, olcsóbban mintha külön vennéd' },
+    { item = 'fishing_license', price = Config.License.price, label = 'Horgászengedély', category = 'license', desc = 'Enélkül nem vethetsz horgot' },
+    { item = 'fishing_bait', price = 275, label = 'Csali doboz', category = 'bait', desc = '20 adag csali egy dobozban' },
+    { item = 'fishing_line_1', price = 550, label = 'Damil — bézs', category = 'line', desc = 'Alap horgászdamil' },
+    { item = 'fishing_line_2', price = 650, label = 'Damil — zöld', category = 'line', desc = 'Színezett damil' },
+    { item = 'fishing_line_3', price = 750, label = 'Damil — fehér', category = 'line', desc = 'Erősebb fehér damil' },
+    { item = 'fishing_line_4', price = 850, label = 'Damil — piros', category = 'line', desc = 'Látható piros damil' },
+    { item = 'fishing_line_7', price = 950, label = 'Damil — kék', category = 'line', desc = 'Prémium kék damil' },
+    { item = 'fishing_float_1', price = 420, label = 'Úszó', category = 'float', desc = 'Alap úszó' },
+    { item = 'fishing_float_2', price = 680, label = 'Úszó Pro', category = 'float', desc = 'Stabilabb, jobb érzékelés' },
+    { item = 'fishing_float_3', price = 980, label = 'Úszó Elite', category = 'float', desc = 'Versenyúszó' },
+    { item = 'fishing_float_4', price = 1350, label = 'Úszó Master', category = 'float', desc = 'Csúcs úszó' },
+    { item = 'fishing_rod_1', price = 3200, label = 'Horgászbot', category = 'rod', desc = 'Alap bot — damil + úszó kell' },
+    { item = 'fishing_rod_2', price = 7800, label = 'Horgászbot Pro', category = 'rod', desc = 'Erősebb, tartósabb bot' },
+    { item = 'fishing_rod_3', price = 14500, label = 'Horgászbot Elite', category = 'rod', desc = 'Csúcs felszerelés' },
+    { item = 'fishing_seerod_5000', price = 45000, label = 'SeeRod 5000', category = 'elite', desc = 'Ritka csúcsbot — eddig csak horgászládából volt elérhető' },
+    { item = 'fishing_seerod_6000', price = 78000, label = 'SeeRod 6000', category = 'elite', desc = 'A legjobb bot pénzért — még ritkább ládaverzió is létezik' },
 }
 
 -- Mirror Park lake — tilos horgászni (példa denied zóna)
@@ -91,6 +136,29 @@ Config.DeniedZones = {
         vector2(1065.0, -630.0),
     },
 }
+
+-- Horgász szint: minden N fogás +1 szint, enyhe rare/legendary bónusz szorzóval fogásesélyre.
+Config.Progression = {
+    enabled = true,
+    catchesPerLevel = 15,
+    maxLevel = 30,
+    legendaryBonusPerLevel = 0.03, -- +3% legendary/rare esély-súly szintenként
+}
+
+-- Horgászhelyek: a már bevált felvásárló-helyszínek (Del Perro / Alamo-tó / Paleto-öböl)
+-- nyílt vízi meghosszabbításában — ezekről tudjuk, hogy víz felett vannak, nem kellett
+-- vadonatúj, élőben nem tesztelt koordinátákat kitalálni hozzájuk.
+Config.Hotspots = {
+    { coords = vector3(-2230.0, -1320.0, 0.0), radius = 90.0, rareBonus = 1.6, label = 'Del Perro mélyvíz' },
+    { coords = vector3(260.0, 3460.0, 0.0), radius = 90.0, rareBonus = 1.6, label = 'Alamo-tó közepe' },
+    { coords = vector3(4120.0, 4620.0, 0.0), radius = 90.0, rareBonus = 1.6, label = 'Paleto-öböl mélyvíz' },
+}
+
+-- Napszak/időjárás hatás — a qb-weathersync exportjaiból olvasva (ha fut a resource, egyébként
+-- kihagyva). Az itt szereplő 3 időjárás-string a qb-weathersync saját config.lua-jában is szerepel.
+Config.NightRareBonus = 1.25 -- 21:00–06:00 (játékbeli idő) között
+Config.RareWeatherBonus = 1.3
+Config.RareWeatherTypes = { RAIN = true, THUNDER = true, FOGGY = true }
 
 -- Stream-ready model names (joaat). Replace when YDR is in stream/
 Config.RodProp = `prop_fishing_rod_01`
@@ -114,8 +182,11 @@ Config.FishPreviewProp = `prop_cs_steak`
 
 Config.RodAttach = {
     bone = 18905,
-    pos = vector3(0.1, 0.05, 0.0),
-    rot = vector3(80.0, 120.0, 160.0),
+    -- Enyhén balra a középről (70/95/188 → balabb)
+    pos = vector3(0.08, 0.03, 0.0),
+    rot = vector3(72.0, 108.0, 175.0),
+    -- Bedobás töltés: bot hátradöntése (kiegészíti a felsőtest-dőlést)
+    castLeanRot = vector3(-28.0, 0.0, 0.0),
 }
 
 -- Calibrated tip for prop_fishing_rod_01 (entity-local). Use /fishtipcalib in-game to fine-tune live.
@@ -125,14 +196,17 @@ Config.RodTipOffset = vector3(0.0, 0.0, 2.51)
 Config.LineGuides = { 0.16, 0.22, 0.41, 0.60, 0.79, 1.0 }
 
 -- When YCD converted: change dict/clips here
+-- True waist lean needs custom fishing_bedobas YCD (v4 IFP is SA-format — not usable on GTA V).
+-- Until then: upper-body-only idle_c scrub (legs stay planted) + rod tilt. NO SetEntityRotation on ped.
 Config.FishAnims = {
     dict = 'amb@world_human_stand_fishing@idle_a',
     idle = 'idle_c',
-    cast = 'idle_a',
+    cast = 'idle_a', -- NEM használjuk — tekerő clip
     getout = 'idle_b',
-    -- Bedobás utáni fagyasztott póz (idle_c: nagyobb = előrébb, kisebb = hátrébb)
-    waterPoseProgress = 1.0,
-    -- future YCD: dict = 'fishing_bedobas', cast = 'bather', idle dict = 'fishing_stand', etc.
+    waterPoseProgress = 0.99,
+    -- Szűk sáv: 0.99 → 0.86 = törzs/derék, nem végigtekeri az orsót
+    castLeanBackProgress = 0.86,
+    castLeanRecoverMs = 750,
 }
 
 Config.Controls = {
@@ -180,6 +254,31 @@ Config.Floats = {
 Config.BaitItem = 'fishing_bait'
 Config.ChestItem = 'fishing_chest'
 
+Config.ChestRewards = {
+    { weight = 8, money = 150 },
+    { weight = 6, money = 200 },
+    { weight = 4, money = 350 },
+    { weight = 3, money = 500 },
+    { weight = 2, money = 750 },
+    { weight = 1, money = 1200 },
+    { weight = 12, item = 'fishing_bait', amount = 2 },
+    { weight = 8, item = 'fishing_bait', amount = 4 },
+    { weight = 6, item = 'fishing_line_1', amount = 1 },
+    { weight = 5, item = 'fishing_line_3', amount = 1 },
+    { weight = 4, item = 'fishing_line_4', amount = 1 },
+    { weight = 3, item = 'fishing_line_6', amount = 1 },
+    { weight = 2, item = 'fishing_line_7', amount = 1 },
+    { weight = 5, item = 'fishing_float_1', amount = 1 },
+    { weight = 4, item = 'fishing_float_2', amount = 1 },
+    { weight = 3, item = 'fishing_float_3', amount = 1 },
+    { weight = 2, item = 'fishing_float_4', amount = 1 },
+    { weight = 4, item = 'fishing_goldchain', amount = 1 },
+    { weight = 2, item = 'fishing_rod_2', amount = 1 },
+    { weight = 1, item = 'fishing_rod_3', amount = 1 },
+    { weight = 3, item = 'fishing_seerod_5000', amount = 1 },
+    { weight = 2, item = 'fishing_seerod_6000', amount = 1 },
+}
+
 Config.Tournament = {
     enabled = true,
     ace = 'fishing.tournament',
@@ -188,4 +287,6 @@ Config.Tournament = {
     durationDays = 7,   -- /fishtournament start [days] default length (v4: fishingmaffia <days>)
     liveBoardN = 5,      -- rows shown on the in-world dropoff leaderboard
     liveBoardDistance = 15.0,
+    prize = { cash = 1000000, pp = 100000 }, -- paid to the #1 player when the tournament ends
+    hypeIntervalMs = 10 * 60000, -- chat teaser interval while a tournament is active
 }

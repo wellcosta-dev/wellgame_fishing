@@ -1,33 +1,75 @@
--- Baitshop + denied zone helpers (client)
+-- Baitshop client — modern NUI (nem qb-menu)
 
 local QBCore = exports['qb-core']:GetCoreObject()
 local shopObjs = {}
+local shopOpen = false
 
-local function openBaitshop()
-    local items = Config.BaitshopItems or {}
-    local scale = Config.EconomyScale or 1.0
-    local menu = {
-        { header = 'Horgász felszerelés', isMenuHeader = true },
-    }
-    for i = 1, #items do
-        local it = items[i]
-        local price = math.floor((it.price or 0) * scale)
-        menu[#menu + 1] = {
-            header = it.label or it.item,
-            txt = ('Ár: %s $'):format(price),
-            params = {
-                event = 'wellgame_fishing:client:buyShopItem',
-                args = { item = it.item, price = price },
-            },
+local function buildShopCatalog()
+    local items = {}
+    local list = Config.BaitshopItems or {}
+    for i = 1, #list do
+        local it = list[i]
+        local shared = QBCore.Shared.Items[it.item]
+        items[#items + 1] = {
+            item = it.item,
+            label = it.label or (shared and shared.label) or it.item,
+            price = math.floor(tonumber(it.price) or 0),
+            category = it.category or 'all',
+            desc = it.desc or (shared and shared.description) or '',
+            image = it.image or (shared and shared.image) or 'fishing_rod_1.png',
         }
     end
-    menu[#menu + 1] = { header = 'Bezárás', params = { event = 'qb-menu:client:closeMenu' } }
-    exports['qb-menu']:openMenu(menu)
+    return items
 end
 
-RegisterNetEvent('wellgame_fishing:client:buyShopItem', function(data)
-    if type(data) ~= 'table' or not data.item then return end
-    TriggerServerEvent('wellgame_fishing:server:buyShopItem', data.item, data.price)
+local function closeBaitshop()
+    if not shopOpen then return end
+    shopOpen = false
+    SetNuiFocus(false, false)
+    SendNUIMessage({ action = 'closeShop' })
+    if GetResourceState('wellgame_controls') == 'started' then
+        exports['wellgame_controls']:toggleAllControls(true, 'wellgame_fishing_shop')
+    end
+end
+
+local function openBaitshop()
+    if shopOpen then return end
+    shopOpen = true
+    SetNuiFocus(true, true)
+    if GetResourceState('wellgame_controls') == 'started' then
+        exports['wellgame_controls']:toggleAllControls(false, 'wellgame_fishing_shop')
+    end
+    SendNUIMessage({
+        action = 'openShop',
+        data = {
+            title = 'Horgászbolt',
+            brand = 'WELLCOSTA',
+            categories = Config.BaitshopCategories or { { id = 'all', label = 'Összes' } },
+            items = buildShopCatalog(),
+            cash = (QBCore.Functions.GetPlayerData().money and QBCore.Functions.GetPlayerData().money.cash) or 0,
+        },
+    })
+end
+
+RegisterNUICallback('shopClose', function(_, cb)
+    closeBaitshop()
+    cb('ok')
+end)
+
+RegisterNUICallback('shopBuy', function(data, cb)
+    cb('ok')
+    if not shopOpen then return end
+    local item = data and data.item
+    if type(item) ~= 'string' or item == '' then return end
+    TriggerServerEvent('wellgame_fishing:server:buyShopItem', item)
+end)
+
+RegisterNetEvent('wellgame_fishing:client:shopBought', function(cash)
+    if not shopOpen then return end
+    SendNUIMessage({
+        action = 'shopCash',
+        cash = tonumber(cash) or 0,
+    })
 end)
 
 CreateThread(function()
@@ -64,7 +106,6 @@ CreateThread(function()
     end
 end)
 
--- Proximity fallback without qb-target
 CreateThread(function()
     if GetResourceState('qb-target') == 'started' then return end
     while true do
@@ -75,7 +116,7 @@ CreateThread(function()
             local c = shops[i].coords
             if #(coords - vector3(c.x, c.y, c.z)) < 2.0 then
                 sleep = 0
-                exports['qb-core']:DrawText('[E] Horgász felszerelés', 'left')
+                exports['qb-core']:DrawText('[E] Horgászbolt', 'left')
                 if IsControlJustPressed(0, 38) then
                     exports['qb-core']:HideText()
                     openBaitshop()
@@ -83,15 +124,13 @@ CreateThread(function()
                 break
             end
         end
-        if sleep ~= 0 then
-            -- hide only when leaving; cheap no-op if already hidden
-        end
         Wait(sleep)
     end
 end)
 
 AddEventHandler('onResourceStop', function(res)
     if res ~= GetCurrentResourceName() then return end
+    closeBaitshop()
     for i = 1, #shopObjs do
         if DoesEntityExist(shopObjs[i]) then DeleteObject(shopObjs[i]) end
     end

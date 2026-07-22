@@ -13,6 +13,18 @@ local sellDidHold = false
 local sellGraph = {}
 local sellFadeA = 0.0 -- 0..1 bar visibility/interactivity ramp (v4: fishSellA, 1s in/out)
 
+--- Szerverről jövő items tábla — felülírja a stale kliens cache-t (eladás után).
+RegisterNetEvent('wellgame_fishing:client:forceInvItems', function(items)
+    if type(items) ~= 'table' then return end
+    -- qb-core + qb-inventory PlayerData
+    TriggerEvent('QBCore:Client:OnPlayerUpdated', 'items', items)
+    if QBCore.PlayerData then
+        QBCore.PlayerData.items = items
+    end
+    -- qb-inventory NUI frissítés (saját PlayerData-ból olvas)
+    TriggerEvent('qb-inventory:client:updateInventory')
+end)
+
 local function closeSellUi()
     sellOpen = false
     sellPhase = nil

@@ -1,5 +1,25 @@
 local QBCore = exports['qb-core']:GetCoreObject()
 
+-- Player.Functions.{GetItemBySlot,GetItemByName,AddItem,RemoveItem} don't exist on this
+-- QBCore fork (inventory access is fully delegated to qb-inventory) — every call site below
+-- used to silently error out mid-handler, which is why rods/bait/line/float never actually
+-- got consumed or granted. Route everything through the real qb-inventory exports instead.
+local function invGetBySlot(src, slot)
+    return exports['qb-inventory']:GetItemBySlot(src, slot)
+end
+
+local function invGetByName(src, name)
+    return exports['qb-inventory']:GetItemByName(src, name)
+end
+
+local function invAddItem(src, item, amount, info)
+    return exports['qb-inventory']:AddItem(src, item, amount, false, info or {})
+end
+
+local function invRemoveItem(src, item, amount, slot)
+    return exports['qb-inventory']:RemoveItem(src, item, amount, slot)
+end
+
 local fishing = {} -- [src] = session
 
 local castRate = {} -- [src] = { times = {}, lastSell = 0 }
@@ -64,6 +84,37 @@ local function saveTournamentScore(cid, name, weight, fish)
     end)
 end
 
+-- Self-migrating: creates the two tables the prize/pending-payout and catch-log features
+-- need, so the resource works out of the box without requiring sql/tournament.sql to be run
+-- by hand (that file is kept as a reference / for manual DBA review, not a hard requirement).
+local function ensureFishingTables()
+    if not MySQL then return end
+    pcall(function()
+        MySQL.query.await([[
+            CREATE TABLE IF NOT EXISTS wellgame_fishing_pending_prizes (
+              citizenid VARCHAR(50) NOT NULL,
+              cash INT NOT NULL DEFAULT 0,
+              pp INT NOT NULL DEFAULT 0,
+              reason VARCHAR(100) NOT NULL DEFAULT '',
+              created_at INT NOT NULL DEFAULT 0,
+              PRIMARY KEY (citizenid)
+            )
+        ]])
+        MySQL.query.await([[
+            CREATE TABLE IF NOT EXISTS wellgame_fishing_log (
+              citizenid VARCHAR(50) NOT NULL,
+              fish_key VARCHAR(64) NOT NULL,
+              count INT NOT NULL DEFAULT 0,
+              best_weight FLOAT NOT NULL DEFAULT 0,
+              best_length INT NOT NULL DEFAULT 0,
+              first_caught_at INT NOT NULL DEFAULT 0,
+              last_caught_at INT NOT NULL DEFAULT 0,
+              PRIMARY KEY (citizenid, fish_key)
+            )
+        ]])
+    end)
+end
+
 local function loadTournamentFromDb()
     if not (Config.Tournament and Config.Tournament.useDatabase) then return end
     if not MySQL then return end
@@ -83,6 +134,7 @@ local function loadTournamentFromDb()
             for i = 1, #rows do
                 local r = rows[i]
                 tournament.scores[r.citizenid] = {
+                    cid = r.citizenid,
                     name = r.name,
                     weight = tonumber(r.weight) or 0,
                     fish = r.fish,
@@ -110,6 +162,78 @@ local function broadcastTournamentBoard()
     TriggerClientEvent('wellgame_fishing:client:tournamentBoard', -1, { active = tournament.active, top = tournamentTop() })
 end
 
+local function formatMoney(n)
+    n = math.floor(tonumber(n) or 0)
+    local s = tostring(n)
+    local out = s:reverse():gsub('(%d%d%d)', '%1 '):reverse():gsub('^%s+', '')
+    return out
+end
+
+-- Pays the tournament prize into a player's bank + premium points (metadata.premiumPoints,
+-- same field wellgame_admin's economy tools use). If they're offline when the tournament
+-- ends, the prize waits in wellgame_fishing_pending_prizes and is paid on their next login.
+local function payTournamentPrize(cid, name)
+    local prize = Config.Tournament and Config.Tournament.prize
+    if not prize or (not prize.cash and not prize.pp) then return end
+    local cash = math.floor(tonumber(prize.cash) or 0)
+    local pp = math.floor(tonumber(prize.pp) or 0)
+    if cash <= 0 and pp <= 0 then return end
+
+    local Player = QBCore.Functions.GetPlayerByCitizenId(cid)
+    if Player then
+        local src = Player.PlayerData.source
+        if cash > 0 then
+            Player.Functions.AddMoney('bank', cash, 'wellgame-fishing-tournament-prize')
+        end
+        if pp > 0 then
+            local oldPp = math.floor(tonumber((Player.PlayerData.metadata or {}).premiumPoints) or 0)
+            local newPp = oldPp + pp
+            Player.Functions.SetMetaData('premiumPoints', newPp)
+            TriggerClientEvent('hud:client:OnPPChange', src, newPp, pp, false)
+        end
+        TriggerClientEvent('QBCore:Notify', src,
+            ('Gratulálunk! Megnyerted a horgászversenyt: %s $ és %s PP a számládon.'):format(formatMoney(cash), formatMoney(pp)), 'success')
+        return
+    end
+
+    if not MySQL then return end
+    pcall(function()
+        MySQL.query.await([[
+            INSERT INTO wellgame_fishing_pending_prizes (citizenid, cash, pp, reason, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE cash = cash + VALUES(cash), pp = pp + VALUES(pp), created_at = VALUES(created_at)
+        ]], { cid, cash, pp, 'tournament', os.time() })
+    end)
+end
+
+-- Catch-up: if the tournament ended while the winner was offline, pay them the moment they log in.
+AddEventHandler('QBCore:Server:PlayerLoaded', function(Player)
+    if not MySQL or not Player then return end
+    local cid = Player.PlayerData.citizenid
+    CreateThread(function()
+        local ok, row = pcall(function()
+            return MySQL.single.await('SELECT * FROM wellgame_fishing_pending_prizes WHERE citizenid = ?', { cid })
+        end)
+        if not ok or not row then return end
+
+        local src = Player.PlayerData.source
+        local cash = math.floor(tonumber(row.cash) or 0)
+        local pp = math.floor(tonumber(row.pp) or 0)
+        if cash > 0 then
+            Player.Functions.AddMoney('bank', cash, 'wellgame-fishing-tournament-prize')
+        end
+        if pp > 0 then
+            local oldPp = math.floor(tonumber((Player.PlayerData.metadata or {}).premiumPoints) or 0)
+            local newPp = oldPp + pp
+            Player.Functions.SetMetaData('premiumPoints', newPp)
+            TriggerClientEvent('hud:client:OnPPChange', src, newPp, pp, false)
+        end
+        MySQL.query('DELETE FROM wellgame_fishing_pending_prizes WHERE citizenid = ?', { cid })
+        TriggerClientEvent('QBCore:Notify', src,
+            ('A legutóbbi horgászverseny nyereményed megérkezett: %s $ és %s PP.'):format(formatMoney(cash), formatMoney(pp)), 'success')
+    end)
+end)
+
 RegisterNetEvent('wellgame_fishing:server:requestTournamentState', function()
     local src = source
     TriggerClientEvent('wellgame_fishing:client:tournamentBoard', src, { active = tournament.active, top = tournamentTop() })
@@ -121,17 +245,35 @@ local function endTournament(announce)
     local top = tournamentTop()
     broadcastTournamentBoard()
     if announce and top[1] then
+        local winner = top[1]
         TriggerClientEvent('QBCore:Notify', -1, 'Horgászverseny vége!', 'primary')
         TriggerClientEvent('wellgame_fishing:client:tournamentWin', -1, {
-            name = top[1].name,
-            weight = top[1].weight,
-            fish = top[1].fish,
+            name = winner.name,
+            weight = winner.weight,
+            fish = winner.fish,
         })
+
+        local prize = Config.Tournament and Config.Tournament.prize
+        if winner.cid then
+            payTournamentPrize(winner.cid, winner.name)
+        end
+        if prize and (prize.cash or prize.pp) then
+            TriggerClientEvent('chat:addMessage', -1, {
+                template = '<div style="padding:2px 0;"><span style="color:#f5b942;">[Wellcosta - Horgászverseny]:</span> <span style="color:#ffffff;">Győztes: </span><span style="color:#3cb882;">{0}</span><span style="color:#ffffff;"> — {1} kg összsúllyal. Nyereménye: </span><span style="color:#3cb882;">{2} $</span><span style="color:#ffffff;"> és </span><span style="color:#3cb882;">{3} PP</span><span style="color:#ffffff;">!</span></div>',
+                args = {
+                    tostring(winner.name or '?'),
+                    tostring(math.floor((winner.weight or 0) * 10) / 10),
+                    formatMoney(prize.cash or 0),
+                    formatMoney(prize.pp or 0),
+                },
+            })
+        end
     end
 end
 
 CreateThread(function()
     Wait(2000)
+    ensureFishingTables()
     loadTournamentState()
     loadTournamentFromDb()
 end)
@@ -144,6 +286,141 @@ CreateThread(function()
             endTournament(true)
         end
     end
+end)
+
+-- "Kedvcsináló" — amíg fut a verseny, rendszeres chat-hirdetés az aktuális állásról, hogy
+-- azok is csatlakozzanak, akik lemaradtak az induló bejelentésről.
+CreateThread(function()
+    while true do
+        Wait((Config.Tournament and Config.Tournament.hypeIntervalMs) or 600000)
+        if tournament.active then
+            local top = tournamentTop()
+            local daysLeft = math.max(0, (tournament.endDay or 0) - currentDayIndex())
+            local prize = Config.Tournament and Config.Tournament.prize
+
+            local leaderText
+            if top[1] then
+                leaderText = ('Jelenlegi élen: <span style="color:#3cb882;">%s</span> (%s kg)'):format(
+                    tostring(top[1].name or '?'), tostring(math.floor((top[1].weight or 0) * 10) / 10))
+            else
+                leaderText = 'Még senki nem fogott halat — legyél te az első!'
+            end
+
+            local prizeText = ''
+            if prize and (prize.cash or prize.pp) then
+                prizeText = (' Fődíj: <span style="color:#3cb882;">%s $</span> és <span style="color:#3cb882;">%s PP</span>.'):format(
+                    formatMoney(prize.cash or 0), formatMoney(prize.pp or 0))
+            end
+
+            TriggerClientEvent('chat:addMessage', -1, {
+                template = ('<div style="padding:2px 0;"><span style="color:#f5b942;">[Wellcosta - Horgászverseny]:</span> <span style="color:#ffffff;">Fut a verseny, még %d napig! %s%s</span></div>')
+                    :format(daysLeft, leaderText, prizeText),
+                args = {},
+            })
+        end
+    end
+end)
+
+-- Personal catch log — one upsert per catch, feeds the /fishlog NUI collection screen.
+local function recordCatchLog(cid, fishKey, weight, length)
+    if not MySQL or not cid or not fishKey then return end
+    weight = tonumber(weight) or 0
+    length = tonumber(length) or 0
+    local now = os.time()
+    pcall(function()
+        MySQL.query.await([[
+            INSERT INTO wellgame_fishing_log (citizenid, fish_key, count, best_weight, best_length, first_caught_at, last_caught_at)
+            VALUES (?, ?, 1, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              count = count + 1,
+              best_weight = GREATEST(best_weight, VALUES(best_weight)),
+              best_length = GREATEST(best_length, VALUES(best_length)),
+              last_caught_at = VALUES(last_caught_at)
+        ]], { cid, fishKey, weight, length, now, now })
+    end)
+end
+
+-- ---------------------------------------------------------------------
+-- Progression (horgász szint) + hotspot + napszak/időjárás bónusz
+-- ---------------------------------------------------------------------
+
+local playerCatchTotals = {} -- [src] = lifetime catches across all species (cached, not re-queried per cast)
+
+local function loadCatchTotal(src, cid)
+    if not MySQL then playerCatchTotals[src] = 0 return end
+    local ok, row = pcall(function()
+        return MySQL.single.await('SELECT SUM(count) AS total FROM wellgame_fishing_log WHERE citizenid = ?', { cid })
+    end)
+    playerCatchTotals[src] = (ok and row and tonumber(row.total)) or 0
+end
+
+local function ensureCatchTotal(src, cid)
+    if playerCatchTotals[src] == nil then loadCatchTotal(src, cid) end
+    return playerCatchTotals[src] or 0
+end
+
+function fisherLevel(totalCatches)
+    local prog = Config.Progression
+    if not prog or not prog.enabled then return 1 end
+    local perLevel = prog.catchesPerLevel or 15
+    return math.min(prog.maxLevel or 30, math.floor((totalCatches or 0) / perLevel) + 1)
+end
+
+-- Hotspot + napszak/időjárás bónusz a Legendary-osztályú halakra. Az időjárás-export
+-- hívása pcall-ban van, mert qb-weathersync nélkül is futnia kell a resource-nak.
+local function computeRareMultiplier(src, cid)
+    local mult = 1.0
+
+    if Config.Progression and Config.Progression.enabled then
+        local level = fisherLevel(ensureCatchTotal(src, cid))
+        mult = mult * (1.0 + (level - 1) * (Config.Progression.legendaryBonusPerLevel or 0))
+    end
+
+    local ped = GetPlayerPed(src)
+    if ped ~= 0 then
+        local coords = GetEntityCoords(ped)
+        for _, hs in ipairs(Config.Hotspots or {}) do
+            local dx, dy = coords.x - hs.coords.x, coords.y - hs.coords.y
+            if math.sqrt(dx * dx + dy * dy) <= (hs.radius or 90.0) then
+                mult = mult * (hs.rareBonus or 1.5)
+                break
+            end
+        end
+    end
+
+    if GetResourceState('qb-weathersync') == 'started' then
+        local okH, hour = pcall(function() return exports['qb-weathersync']:getTime() end)
+        if okH and hour and (hour >= 21 or hour < 6) then
+            mult = mult * (Config.NightRareBonus or 1.0)
+        end
+        local okW, weather = pcall(function() return exports['qb-weathersync']:getWeatherState() end)
+        if okW and weather and Config.RareWeatherTypes and Config.RareWeatherTypes[weather] then
+            mult = mult * (Config.RareWeatherBonus or 1.0)
+        end
+    end
+
+    return mult
+end
+
+AddEventHandler('QBCore:Server:PlayerLoaded', function(Player)
+    if not Player then return end
+    loadCatchTotal(Player.PlayerData.source, Player.PlayerData.citizenid)
+end)
+
+AddEventHandler('playerDropped', function()
+    playerCatchTotals[source] = nil
+end)
+
+QBCore.Functions.CreateCallback('wellgame_fishing:server:getLog', function(source, cb)
+    local Player = QBCore.Functions.GetPlayer(source)
+    if not Player or not MySQL then cb({}, 1) return end
+    local ok, rows = pcall(function()
+        return MySQL.query.await(
+            'SELECT fish_key, count, best_weight, best_length, first_caught_at, last_caught_at FROM wellgame_fishing_log WHERE citizenid = ?',
+            { Player.PlayerData.citizenid }
+        )
+    end)
+    cb(ok and type(rows) == 'table' and rows or {}, fisherLevel(ensureCatchTotal(source, Player.PlayerData.citizenid)))
 end)
 
 local function notify(src, typ, msg)
@@ -265,7 +542,12 @@ function StartBiteWait(src)
         local d = fishing[src]
         -- Strict: only bite while still waiting with bait in the water
         if not d or d.mode ~= 'waiting' or not d.hasBait then return end
-        local fish = ChooseRandomFish()
+        local biteMult = 1.0
+        local biteCid = (QBCore.Functions.GetPlayer(src) or {}).PlayerData
+        biteCid = biteCid and biteCid.citizenid or nil
+        if biteCid then biteMult = computeRareMultiplier(src, biteCid) end
+
+        local fish = ChooseRandomFish(biteMult)
         if not fish or not FishTypes[fish] then
             StartBiteWait(src)
             return
@@ -296,9 +578,15 @@ RegisterNetEvent('wellgame_fishing:server:start', function(slot)
     local src = source
     local Player = QBCore.Functions.GetPlayer(src)
     if not Player then return end
+
+    if Config.License and Config.License.enabled and not Player.Functions.HasItem(Config.License.item, 1) then
+        notify(src, 'error', 'Horgászengedély nélkül nem vethetsz horgot — vedd meg a boltban.')
+        return
+    end
+
     if fishing[src] then CancelFishing(src) end
 
-    local item = Player.Functions.GetItemBySlot(slot)
+    local item = invGetBySlot(src, slot)
     if not item or not Config.Rods[item.name] then
         notify(src, 'error', 'Érvénytelen horgászbot.')
         return
@@ -378,7 +666,7 @@ RegisterNetEvent('wellgame_fishing:server:cast', function()
     if not Player then return end
 
     if not data.hasBait then
-        local bait = Player.Functions.GetItemByName(Config.BaitItem)
+        local bait = invGetByName(src, Config.BaitItem)
         if not bait then
             notify(src, 'error', 'Nincs nálad csali!')
             TriggerClientEvent('wellgame_fishing:client:setMode', src, 'idle')
@@ -388,7 +676,7 @@ RegisterNetEvent('wellgame_fishing:server:cast', function()
         local uses = tonumber(getItemInfo(bait, 'uses', 0)) or 0
         uses = uses + 1
         if uses >= (Config.BaitDose or 20) then
-            Player.Functions.RemoveItem(Config.BaitItem, 1, bait.slot)
+            invRemoveItem(src, Config.BaitItem, 1, bait.slot)
             TriggerClientEvent('inventory:client:ItemBox', src, QBCore.Shared.Items[Config.BaitItem], 'remove')
         else
             setItemInfo(src, bait.slot, 'uses', uses)
@@ -475,9 +763,11 @@ RegisterNetEvent('wellgame_fishing:server:land', function()
 
     local fightMs = data.biteAt and ((os.time() - data.biteAt) * 1000) or 0
     local info = { weight = weight, fish = fishKey }
-    if Player.Functions.AddItem(ft.item, 1, false, info) then
+    if invAddItem(src, ft.item, 1, info) then
         TriggerClientEvent('inventory:client:ItemBox', src, QBCore.Shared.Items[ft.item], 'add')
         local len = CalculateFishLength(fishKey, weight)
+        recordCatchLog(Player.PlayerData.citizenid, fishKey, weight, len)
+        playerCatchTotals[src] = (playerCatchTotals[src] or 0) + 1
         notify(src, 'success', ('Kifogtál egy %s!'):format(ft.nameEx))
         notify(src, 'primary', ('Súly: %s kg, hossz: %s cm'):format(weight, len))
 
@@ -497,7 +787,7 @@ RegisterNetEvent('wellgame_fishing:server:land', function()
             local name = Player.PlayerData.charinfo and (Player.PlayerData.charinfo.firstname .. ' ' .. Player.PlayerData.charinfo.lastname) or GetPlayerName(src)
             local prev = tournament.scores[cid]
             local newWeight = (prev and prev.weight or 0) + weight
-            tournament.scores[cid] = { name = name, weight = newWeight, fish = ft.name, at = os.time() }
+            tournament.scores[cid] = { cid = cid, name = name, weight = newWeight, fish = ft.name, at = os.time() }
             saveTournamentScore(cid, name, weight, ft.name)
             broadcastTournamentBoard()
 
@@ -541,7 +831,7 @@ RegisterNetEvent('wellgame_fishing:server:snap', function(tear)
     local Player = QBCore.Functions.GetPlayer(src)
     if not Player then return end
 
-    local item = Player.Functions.GetItemBySlot(data.rodSlot)
+    local item = invGetBySlot(src, data.rodSlot)
     if item and item.name == data.rodName then
         -- v4-feel (játékos elvárás): damil megmarad wear-rel; a hal elviszi az úszót
         local wear = (tonumber(getItemInfo(item, 'wear', 0)) or 0) + math.random(15, 35)
@@ -573,8 +863,8 @@ RegisterNetEvent('wellgame_fishing:server:snap', function(tear)
 
         -- refresh client rod meta so next cast checks float/line
         TriggerClientEvent('wellgame_fishing:client:rodMeta', src, {
-            line = tonumber(getItemInfo(Player.Functions.GetItemBySlot(data.rodSlot), 'line', 0)) or 0,
-            wear = tonumber(getItemInfo(Player.Functions.GetItemBySlot(data.rodSlot), 'wear', 0)) or 0,
+            line = tonumber(getItemInfo(invGetBySlot(src, data.rodSlot), 'line', 0)) or 0,
+            wear = tonumber(getItemInfo(invGetBySlot(src, data.rodSlot), 'wear', 0)) or 0,
             float = 0,
             lostLine = lostLine,
         })
@@ -615,14 +905,14 @@ RegisterNetEvent('wellgame_fishing:server:attachLine', function(lineSlot, rodSlo
     local src = source
     local Player = QBCore.Functions.GetPlayer(src)
     if not Player then return end
-    local lineItem = Player.Functions.GetItemBySlot(lineSlot)
-    local rodItem = Player.Functions.GetItemBySlot(rodSlot)
+    local lineItem = invGetBySlot(src, lineSlot)
+    local rodItem = invGetBySlot(src, rodSlot)
     if not lineItem or not rodItem then return end
     local lineId = Config.Lines[lineItem.name]
     if not lineId or not Config.Rods[rodItem.name] then return end
     setItemInfo(src, rodSlot, 'line', lineId)
     setItemInfo(src, rodSlot, 'wear', 0)
-    Player.Functions.RemoveItem(lineItem.name, 1, lineSlot)
+    invRemoveItem(src, lineItem.name, 1, lineSlot)
     notify(src, 'success', ('Felszereltél egy %s damilt.'):format(Config.LineColors[lineId][4]))
     if fishing[src] then
         fishing[src].line = lineId
@@ -639,13 +929,13 @@ RegisterNetEvent('wellgame_fishing:server:attachFloat', function(floatSlot, rodS
     local src = source
     local Player = QBCore.Functions.GetPlayer(src)
     if not Player then return end
-    local floatItem = Player.Functions.GetItemBySlot(floatSlot)
-    local rodItem = Player.Functions.GetItemBySlot(rodSlot)
+    local floatItem = invGetBySlot(src, floatSlot)
+    local rodItem = invGetBySlot(src, rodSlot)
     if not floatItem or not rodItem then return end
     local floatId = Config.Floats[floatItem.name]
     if not floatId or not Config.Rods[rodItem.name] then return end
     setItemInfo(src, rodSlot, 'float', floatId)
-    Player.Functions.RemoveItem(floatItem.name, 1, floatSlot)
+    invRemoveItem(src, floatItem.name, 1, floatSlot)
     notify(src, 'success', 'Felszereltél egy úszót.')
     if fishing[src] then
         fishing[src].float = floatId

@@ -19,6 +19,7 @@ client_scripts {
     'client/stand.lua',
     'client/sync.lua',
     'client/baitshop.lua',
+    'client/fishlog.lua',
 }
 
 server_scripts {
@@ -47,3 +48,4 @@ files {
 dependency 'qb-core'
 dependency 'qb-inventory'
 dependency 'oxmysql'
+dependency 'wellgames-gui'

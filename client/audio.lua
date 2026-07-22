@@ -1,11 +1,34 @@
--- Fishing audio API (exported — lua54 safe across files)
--- Rate-limited one-shots via NUI sound pool (avoids overlapping crackle)
+-- Fishing audio — looping reel/spindle (volume only, throttled NUI, no playbackRate)
 
-local lastReel, lastSpindle, lastCreak = 0, 0, 0
 local lastTension = 0.0
+local lastCreak = 0
+local lastReelVol = -1.0
+local lastSpindleVol = -1.0
+local VOL_EPS = 0.02
 
 local function nuiSound(file, vol)
     SendNUIMessage({ action = 'playSound', file = file, volume = vol or 0.4 })
+end
+
+local function nuiLoop(id, file, volume)
+    volume = math.max(0.0, math.min(1.0, tonumber(volume) or 0.0))
+    local prev = id == 'reel' and lastReelVol or lastSpindleVol
+    -- Skip tiny changes; always send mute↔unmute edges
+    local edge = (volume <= 0.001) ~= (prev <= 0.001)
+    if prev >= 0.0 and not edge and math.abs(volume - prev) < VOL_EPS then
+        return
+    end
+    if id == 'reel' then
+        lastReelVol = volume
+    else
+        lastSpindleVol = volume
+    end
+    SendNUIMessage({
+        action = 'loopSound',
+        id = id,
+        file = file,
+        volume = volume,
+    })
 end
 
 local API = {}
@@ -34,26 +57,28 @@ function API.Gear()
     nuiSound('gear.mp3', 0.3)
 end
 
+--- v4 processReelSound volume curve — quieter, rate fixed in NUI
 function API.ProcessReel(spd)
-    local now = GetGameTimer()
-    if not spd or spd <= 0.12 then return end
-    local vol = math.min(0.28, (spd / 8.0) * 0.22)
-    -- Long interval — one overlapping Audio() stack was the crackle source
-    local interval = math.max(220, math.floor(380 / math.max(0.35, spd / 4.0)))
-    if now - lastReel >= interval then
-        lastReel = now
-        nuiSound('reel.mp3', vol)
+    spd = tonumber(spd) or 0.0
+    if spd <= 0.0 then
+        nuiLoop('reel', 'reel.mp3', 0.0)
+        return
     end
+    local s = spd / 10.0
+    local vol = math.min(0.38, math.min(1.0, s * 2.4) * 0.32)
+    nuiLoop('reel', 'reel.mp3', vol)
 end
 
+--- v4 processSpindleSound — scroll/handle; keep softer to avoid mud with reel
 function API.ProcessSpindle(spd)
-    local now = GetGameTimer()
-    if not spd or spd <= 0.12 then return end
-    local vol = math.min(0.3, (spd / 8.0) * 0.25)
-    if now - lastSpindle >= 280 then
-        lastSpindle = now
-        nuiSound('spindle.mp3', vol)
+    spd = tonumber(spd) or 0.0
+    if spd <= 0.0 then
+        nuiLoop('spindle', 'spindle.mp3', 0.0)
+        return
     end
+    local s = spd / 7.5
+    local vol = math.min(0.32, math.min(1.0, s * 2.2) * 0.22)
+    nuiLoop('spindle', 'spindle.mp3', vol)
 end
 
 function API.ProcessCreak(tension, dt)
@@ -62,19 +87,24 @@ function API.ProcessCreak(tension, dt)
         creak = ((tension or 0) - lastTension) / dt * 25.0 * math.min(1.0, math.max(0.0, (tension or 0) / 0.5))
     end
     lastTension = tension or 0.0
-    -- Higher threshold + slower fire = less recsegés
-    if creak > 0.22 then
+    if creak > 0.28 then
         local now = GetGameTimer()
-        if now - lastCreak >= 350 then
+        if now - lastCreak >= 400 then
             lastCreak = now
-            nuiSound('creak.mp3', math.min(0.35, creak / 0.2 * 0.22))
+            nuiSound('creak.mp3', math.min(0.18, creak / 0.2 * 0.12))
         end
     end
 end
 
 function API.Reset()
     lastTension = 0.0
-    lastReel, lastSpindle, lastCreak = 0, 0, 0
+    lastCreak = 0
+    lastReelVol = -1.0
+    lastSpindleVol = -1.0
+    SendNUIMessage({ action = 'loopSound', id = 'reel', file = 'reel.mp3', volume = 0.0 })
+    SendNUIMessage({ action = 'loopSound', id = 'spindle', file = 'spindle.mp3', volume = 0.0 })
+    lastReelVol = 0.0
+    lastSpindleVol = 0.0
 end
 
 exports('GetAudio', function()
