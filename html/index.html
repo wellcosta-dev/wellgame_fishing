@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="stylesheet" href="css/style.css" />
+  <title>wellgame_fishing</title>
+</head>
+<body>
+  <!-- Kapás banner (v4 gotfish1/2) — háttér citromsárga tint -->
+  <div id="gotfish" class="hidden">
+    <div id="gotfish-bg" class="gotfish-layer gotfish-bg" aria-hidden="true"></div>
+    <div id="gotfish-fg" class="gotfish-layer gotfish-fg">
+      <div class="gotfish-text-img" role="img" aria-label="Kapásod van!"></div>
+    </div>
+  </div>
+
+  <!-- Alsó feszültség sáv -->
+  <div id="tension-hud" class="hidden">
+    <div class="tension-frame">
+      <div class="tension-track">
+        <div id="tension-fill" class="tension-fill"></div>
+        <img id="tengrad" class="tengrad hidden" src="img/tengrad.png" alt="" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Jobb alsó orsó + damil + fokozat -->
+  <div id="spindle-hud" class="hidden">
+    <div class="spindle-wrap">
+      <div class="spindle-stack">
+        <canvas id="orsol" class="orso-layer orsol" width="128" height="128"></canvas>
+        <img id="orso1" class="orso-layer" src="img/orso1.png" alt="" />
+        <img id="orso2" class="orso-layer" src="img/orso2.png" alt="" />
+        <img id="orso3" class="orso-layer" src="img/orso3.png" alt="" />
+        <img id="orso4" class="orso-layer" src="img/orso4.png" alt="" />
+      </div>
+      <div class="spindle-meta">
+        <div class="gears-label">FOKOZAT</div>
+        <div class="gears" id="gears">
+          <span data-g="1">1</span>
+          <span data-g="2">2</span>
+          <span data-g="3">3</span>
+          <span data-g="4">4</span>
+          <span data-g="5">5</span>
+        </div>
+        <div class="line-len">
+          <span id="line-int">0</span><span id="line-dec" class="line-dec">.0 m</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dobás töltés (csak aim közben) -->
+  <div id="charge-hud" class="hidden">
+    <div class="charge-track"><div id="charge-fill"></div></div>
+  </div>
+
+  <!-- Float depth (v4 float.png + waterline.png) -->
+  <div id="float-depth" class="hidden">
+    <div class="float-depth-frame">
+      <img id="waterline-img" src="img/waterline.png" alt="" />
+      <img id="float-img" src="img/float.png" alt="" />
+      <div id="float-depth-label">2.5 m</div>
+    </div>
+  </div>
+
+<div id="win" class="hidden">
+    <div class="win-glow win-glow-1" aria-hidden="true"></div>
+    <div class="win-glow win-glow-2" aria-hidden="true"></div>
+    <div class="win-card">
+      <div class="win-class" id="win-class">COMMON</div>
+      <div class="win-name" id="win-name">Hal</div>
+      <div class="win-stats" id="win-stats"></div>
+      <div class="win-meta" id="win-meta"></div>
+    </div>
+  </div>
+
+  <!-- Tournament leaderboard -->
+  <div id="tournament" class="hidden">
+    <div class="tournament-card">
+      <header class="tournament-header">
+        <span class="brand">WELLCOSTA</span>
+        <span class="sub">HORGÁSZVERSENY</span>
+        <button type="button" class="btn-x" id="tournament-close">✕</button>
+      </header>
+      <ol id="tournament-list" class="tournament-list"></ol>
+      <p id="tournament-empty" class="tournament-empty hidden">Még nincs eredmény.</p>
+    </div>
+  </div>
+
+  <!-- Világtér-vetített élő horgászverseny tábla a felvásárlóknál (v4: in-world monitor) -->
+  <div id="tournament-live" class="hidden">
+    <div class="tlive-card">
+      <div class="tlive-header">Fishing Tournament</div>
+      <ol id="tournament-live-list" class="tlive-list"></ol>
+    </div>
+  </div>
+
+  <!-- Verseny győzelmi ünneplés (v4: gotFishingEventWin — win.dds + event/tournament.dds) -->
+  <div id="tournament-win" class="hidden">
+    <div class="twin-burst" aria-hidden="true"></div>
+    <div class="twin-card">
+      <img class="twin-logo" src="img/tournament.png" alt="Fishing Tournament" />
+      <div class="twin-caption">Győztes</div>
+      <div class="twin-name" id="tournament-win-name">?</div>
+      <div class="twin-stats" id="tournament-win-stats"></div>
+    </div>
+  </div>
+
+  <div id="sell" class="hidden">
+    <div class="sell-panel" id="sell-panel">
+      <header class="sell-header">
+        <span class="brand">WELLCOSTA</span>
+        <span class="sub">HAL ELADÁS</span>
+        <button type="button" class="btn-x" id="sell-close">✕</button>
+      </header>
+      <div class="sell-body">
+        <div class="sell-name" id="sell-name">Hal</div>
+        <p class="sell-line" id="sell-length">Hossz: —</p>
+        <p class="sell-line sell-price-range" id="sell-range">Eladási ár: —</p>
+        <button type="button" class="btn btn-sell" id="sell-btn">ELADÁS</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v4 SPACE minigame bar (bottom) -->
+  <div id="sell-game" class="hidden">
+    <div class="sell-game-frame">
+      <div class="sell-game-track">
+        <div id="sell-game-fill" class="sell-game-fill"></div>
+        <div class="sell-game-ticks" aria-hidden="true"></div>
+      </div>
+      <div class="sell-game-labels">
+        <span id="sell-game-left" class="sell-game-min">0 $</span>
+        <span id="sell-game-mid" class="sell-game-max">0 $</span>
+        <span id="sell-game-right" class="sell-game-min">0 $</span>
+      </div>
+      <div id="sell-game-cursor" class="sell-game-cursor">0 $</div>
+    </div>
+  </div>
+
+  <!-- Felvásárló NPC névtáblák (wellgame-nametag stílus) -->
+  <div id="npc-tags"></div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
